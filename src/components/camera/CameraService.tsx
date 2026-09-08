@@ -1,0 +1,475 @@
+"use client";
+
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
+
+import {
+  recognizeRound,
+  type RoundOCRResult,
+} from "@/lib/ocr/RoundOCR";
+
+type CaptureRecord = {
+  timestamp: string;
+  roundNumber: number | null;
+  rawText: string;
+  confidence: number;
+  imageData: string | null;
+};
+
+type CameraContextType = {
+  stream: MediaStream | null;
+  isCameraReady: boolean;
+  cameraError: string | null;
+
+  automaticAnalysis: boolean;
+  isAnalyzing: boolean;
+
+  lastCapture: CaptureRecord | null;
+  lastRoundNumber: number | null;
+  lastOCR: RoundOCRResult | null;
+
+  startCamera: () => Promise<void>;
+  stopCamera: () => void;
+  analyzeNow: () => Promise<void>;
+  setAutomaticAnalysis: (enabled: boolean) => void;
+};
+
+const CameraContext = createContext<CameraContextType | null>(null);
+
+export function CameraProvider({
+  children,
+}: {
+  children: ReactNode;
+}) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
+  const analyzingRef = useRef(false);
+  const automaticRef = useRef(true);
+
+  const lastRoundRef = useRef<number | null>(null);
+
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const [isCameraReady, setIsCameraReady] = useState(false);
+  const [cameraError, setCameraError] = useState<string | null>(null);
+
+  const [automaticAnalysis, setAutomaticAnalysisState] =
+    useState(true);
+
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+
+  const [lastCapture, setLastCapture] =
+    useState<CaptureRecord | null>(null);
+
+  const [lastRoundNumber, setLastRoundNumber] =
+    useState<number | null>(null);
+
+  const [lastOCR, setLastOCR] =
+    useState<RoundOCRResult | null>(null);
+
+  useEffect(() => {
+    automaticRef.current = automaticAnalysis;
+  }, [automaticAnalysis]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+
+    return () => {
+      mountedRef.current = false;
+
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, []);
+
+  const startCamera = useCallback(async () => {
+    try {
+      setCameraError(null);
+
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error(
+          "المتصفح لا يدعم استخدام كاميرا الجهاز."
+        );
+      }
+
+      if (streamRef.current) {
+        setIsCameraReady(true);
+        return;
+      }
+
+      const mediaStream =
+        await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: {
+              ideal: "environment",
+            },
+            width: {
+              ideal: 1080,
+            },
+            height: {
+              ideal: 1920,
+            },
+          },
+          audio: false,
+        });
+
+      streamRef.current = mediaStream;
+
+      if (mountedRef.current) {
+        setStream(mediaStream);
+        setIsCameraReady(true);
+      }
+    } catch (error) {
+      console.error("Camera error:", error);
+
+      if (mountedRef.current) {
+        setIsCameraReady(false);
+
+        setCameraError(
+          error instanceof Error
+            ? error.message
+            : "تعذر تشغيل الكاميرا."
+        );
+      }
+    }
+  }, []);
+
+  const stopCamera = useCallback(() => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+
+    if (streamRef.current) {
+      streamRef.current
+        .getTracks()
+        .forEach((track) => track.stop());
+
+      streamRef.current = null;
+    }
+
+    if (mountedRef.current) {
+      setStream(null);
+      setIsCameraReady(false);
+      setIsAnalyzing(false);
+    }
+  }, []);
+
+  const captureFrame = useCallback(() => {
+    const video = videoRef.current;
+
+    if (!video || video.readyState < 2) {
+      return null;
+    }
+
+    if (
+      video.videoWidth <= 0 ||
+      video.videoHeight <= 0
+    ) {
+      return null;
+    }
+
+    const canvas = document.createElement("canvas");
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      return null;
+    }
+
+    context.drawImage(
+      video,
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+
+    return {
+      video,
+      canvas,
+      imageData: canvas.toDataURL(
+        "image/jpeg",
+        0.82
+      ),
+    };
+  }, []);
+
+  const scheduleNextAnalysis = useCallback(() => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+
+    if (
+      !automaticRef.current ||
+      !streamRef.current ||
+      !mountedRef.current
+    ) {
+      return;
+    }
+
+    /*
+     * يبدأ العد من جديد بعد انتهاء التحليل.
+     * هذا يمنع تداخل عمليات OCR.
+     */
+    timerRef.current = setTimeout(() => {
+      void analyzeNow();
+    }, 5000);
+  }, []);
+
+  const analyzeNow = useCallback(async () => {
+    if (analyzingRef.current) {
+      return;
+    }
+
+    if (!streamRef.current) {
+      setCameraError(
+        "شغّل الكاميرا أولًا قبل التحليل."
+      );
+      return;
+    }
+
+    const capture = captureFrame();
+
+    if (!capture) {
+      setCameraError(
+        "لم يتم الحصول على صورة واضحة من الكاميرا."
+      );
+
+      scheduleNextAnalysis();
+      return;
+    }
+
+    analyzingRef.current = true;
+
+    if (mountedRef.current) {
+      setIsAnalyzing(true);
+      setCameraError(null);
+    }
+
+    try {
+      const ocr = await recognizeRound(
+        capture.video
+      );
+
+      if (mountedRef.current) {
+        setLastOCR(ocr);
+      }
+
+      const captureRecord: CaptureRecord = {
+        timestamp: new Date().toISOString(),
+        roundNumber: ocr.roundNumber,
+        rawText: ocr.rawText,
+        confidence: ocr.confidence,
+        imageData: capture.imageData,
+      };
+
+      /*
+       * منع تكرار الجولة.
+       */
+      const isDuplicate =
+        ocr.roundNumber !== null &&
+        lastRoundRef.current === ocr.roundNumber;
+
+      if (ocr.success && !isDuplicate) {
+        lastRoundRef.current =
+          ocr.roundNumber;
+
+        if (mountedRef.current) {
+          setLastRoundNumber(
+            ocr.roundNumber
+          );
+
+          setLastCapture(
+            captureRecord
+          );
+        }
+
+        console.log(
+          "[GreedyCat AI] New round detected:",
+          ocr.roundNumber
+        );
+      } else if (isDuplicate) {
+        console.log(
+          "[GreedyCat AI] Duplicate round ignored:",
+          ocr.roundNumber
+        );
+
+        if (mountedRef.current) {
+          setLastCapture(
+            captureRecord
+          );
+        }
+      } else {
+        console.log(
+          "[GreedyCat AI] OCR did not produce a valid new round:",
+          ocr.rawText
+        );
+
+        if (mountedRef.current) {
+          setLastCapture(
+            captureRecord
+          );
+        }
+      }
+    } catch (error) {
+      console.error(
+        "[GreedyCat AI] Analysis error:",
+        error
+      );
+
+      if (mountedRef.current) {
+        setCameraError(
+          "حدث خطأ أثناء تحليل الصورة."
+        );
+      }
+    } finally {
+      analyzingRef.current = false;
+
+      if (mountedRef.current) {
+        setIsAnalyzing(false);
+      }
+
+      /*
+       * لا يبدأ التحليل التالي إلا بعد
+       * انتهاء العملية الحالية.
+       */
+      scheduleNextAnalysis();
+    }
+  }, [captureFrame, scheduleNextAnalysis]);
+
+  const setAutomaticAnalysis = useCallback(
+    (enabled: boolean) => {
+      automaticRef.current = enabled;
+
+      if (mountedRef.current) {
+        setAutomaticAnalysisState(
+          enabled
+        );
+      }
+
+      if (!enabled) {
+        if (timerRef.current) {
+          clearTimeout(timerRef.current);
+          timerRef.current = null;
+        }
+
+        return;
+      }
+
+      /*
+       * عند تشغيل الوضع التلقائي،
+       * ننتظر 5 ثوانٍ ثم نحلل.
+       */
+      scheduleNextAnalysis();
+    },
+    [scheduleNextAnalysis]
+  );
+
+  /*
+   * ربط الـvideo بالكاميرا على مستوى Provider.
+   * الكاميرا تبقى موجودة حتى عند الانتقال
+   * بين صفحات الواجهة طالما Provider موجود
+   * في layout.
+   */
+  useEffect(() => {
+    if (!stream) return;
+
+    const video = document.createElement(
+      "video"
+    );
+
+    video.autoplay = true;
+    video.muted = true;
+    video.playsInline = true;
+    video.srcObject = stream;
+
+    videoRef.current = video;
+
+    void video.play().catch((error) => {
+      console.error(
+        "Video playback error:",
+        error
+      );
+    });
+
+    return () => {
+      if (videoRef.current === video) {
+        videoRef.current = null;
+      }
+    };
+  }, [stream]);
+
+  /*
+   * بدء التحليل التلقائي بعد تشغيل الكاميرا.
+   */
+  useEffect(() => {
+    if (!stream || !automaticAnalysis) {
+      return;
+    }
+
+    scheduleNextAnalysis();
+
+    return () => {
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, [
+    stream,
+    automaticAnalysis,
+    scheduleNextAnalysis,
+  ]);
+
+  const value: CameraContextType = {
+    stream,
+    isCameraReady,
+    cameraError,
+
+    automaticAnalysis,
+    isAnalyzing,
+
+    lastCapture,
+    lastRoundNumber,
+    lastOCR,
+
+    startCamera,
+    stopCamera,
+    analyzeNow,
+    setAutomaticAnalysis,
+  };
+
+  return (
+    <CameraContext.Provider value={value}>
+      {children}
+    </CameraContext.Provider>
+  );
+}
+
+export function useCamera() {
+  const context =
+    useContext(CameraContext);
+
+  if (!context) {
+    throw new Error(
+      "useCamera must be used inside CameraProvider"
+    );
+  }
+
+  return context;
+}

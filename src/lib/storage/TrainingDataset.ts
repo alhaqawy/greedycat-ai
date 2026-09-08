@@ -1,0 +1,193 @@
+export type TrainingLabel =
+  | "corn"
+  | "pepper"
+  | "tomato"
+  | "carrot"
+  | "shrimp"
+  | "fish"
+  | "cow"
+  | "chick";
+
+export interface TrainingSample {
+  id: string;
+  roundNumber: number;
+  label: TrainingLabel | null;
+  imageData: string;
+  ocrConfidence: number;
+  rawOCR: string;
+  createdAt: string;
+  labeledAt: string | null;
+}
+
+const DB_NAME = "greedycat-ai";
+const DB_VERSION = 1;
+const STORE_NAME = "training_samples";
+
+function openDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+
+    request.onupgradeneeded = () => {
+      const db = request.result;
+
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        const store = db.createObjectStore(STORE_NAME, {
+          keyPath: "roundNumber",
+        });
+
+        store.createIndex("label", "label", { unique: false });
+        store.createIndex("createdAt", "createdAt", { unique: false });
+      }
+    };
+
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function saveTrainingSample(
+  sample: Omit<TrainingSample, "id" | "createdAt" | "labeledAt">,
+): Promise<TrainingSample> {
+  const db = await openDatabase();
+
+  const record: TrainingSample = {
+    ...sample,
+    id: `round-${sample.roundNumber}`,
+    createdAt: new Date().toISOString(),
+    labeledAt: sample.label ? new Date().toISOString() : null,
+  };
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+
+    const request = store.add(record);
+
+    request.onsuccess = () => {
+      resolve(record);
+    };
+
+    request.onerror = () => {
+      if (request.error?.name === "ConstraintError") {
+        reject(new Error("ROUND_ALREADY_EXISTS"));
+      } else {
+        reject(request.error);
+      }
+    };
+
+    transaction.oncomplete = () => db.close();
+  });
+}
+
+export async function updateTrainingLabel(
+  roundNumber: number,
+  label: TrainingLabel,
+): Promise<TrainingSample> {
+  const db = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, "readwrite");
+    const store = transaction.objectStore(STORE_NAME);
+
+    const getRequest = store.get(roundNumber);
+
+    getRequest.onsuccess = () => {
+      const existing = getRequest.result as TrainingSample | undefined;
+
+      if (!existing) {
+        reject(new Error("ROUND_NOT_FOUND"));
+        return;
+      }
+
+      const updated: TrainingSample = {
+        ...existing,
+        label,
+        labeledAt: new Date().toISOString(),
+      };
+
+      const putRequest = store.put(updated);
+
+      putRequest.onsuccess = () => resolve(updated);
+      putRequest.onerror = () => reject(putRequest.error);
+    };
+
+    getRequest.onerror = () => reject(getRequest.error);
+
+    transaction.oncomplete = () => db.close();
+  });
+}
+
+export async function getTrainingSample(
+  roundNumber: number,
+): Promise<TrainingSample | null> {
+  const db = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, "readonly");
+    const store = transaction.objectStore(STORE_NAME);
+
+    const request = store.get(roundNumber);
+
+    request.onsuccess = () => {
+      resolve((request.result as TrainingSample | undefined) ?? null);
+    };
+
+    request.onerror = () => reject(request.error);
+
+    transaction.oncomplete = () => db.close();
+  });
+}
+
+export async function getAllTrainingSamples(): Promise<TrainingSample[]> {
+  const db = await openDatabase();
+
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(STORE_NAME, "readonly");
+    const store = transaction.objectStore(STORE_NAME);
+
+    const request = store.getAll();
+
+    request.onsuccess = () => {
+      const samples = request.result as TrainingSample[];
+
+      samples.sort((a, b) => b.roundNumber - a.roundNumber);
+
+      resolve(samples);
+    };
+
+    request.onerror = () => reject(request.error);
+
+    transaction.oncomplete = () => db.close();
+  });
+}
+
+export async function getTrainingStats() {
+  const samples = await getAllTrainingSamples();
+
+  const labeled = samples.filter((sample) => sample.label !== null);
+  const unlabeled = samples.filter((sample) => sample.label === null);
+
+  const distribution: Record<TrainingLabel, number> = {
+    corn: 0,
+    pepper: 0,
+    tomato: 0,
+    carrot: 0,
+    shrimp: 0,
+    fish: 0,
+    cow: 0,
+    chick: 0,
+  };
+
+  for (const sample of labeled) {
+    if (sample.label) {
+      distribution[sample.label]++;
+    }
+  }
+
+  return {
+    total: samples.length,
+    labeled: labeled.length,
+    unlabeled: unlabeled.length,
+    distribution,
+  };
+}

@@ -20,7 +20,6 @@ export default function CameraPanel() {
     analyzeNow,
     setAutomaticAnalysis,
     lastCapture,
-    lastRoundNumber,
     lastDetectedResult,
     lastResultConfidence,
   } = useCamera();
@@ -44,7 +43,7 @@ export default function CameraPanel() {
   ];
 
   const handleTrainingLabel = async (label: TrainingLabel) => {
-    const roundNumber = lastRoundNumber ?? lastCapture?.roundNumber ?? null;
+    const roundNumber = lastCapture?.roundNumber;
 
     if (!roundNumber) {
       setTrainingMessage("حلّل الجولة أولاً ثم اختر النتيجة الصحيحة.");
@@ -91,7 +90,7 @@ export default function CameraPanel() {
   return (
     <div className="space-y-4">
       <div className="relative mx-auto w-full max-w-[420px] overflow-hidden rounded-[24px] border-[6px] border-[#102337] bg-black shadow-2xl">
-        <div className="relative aspect-[4/5] overflow-hidden bg-[#071827] md:aspect-[4/5] 2xl:aspect-[9/16]">
+        <div className="relative aspect-[9/16] overflow-hidden bg-[#071827]">
           {isCameraReady && stream ? (
             <video
               ref={videoRef}
@@ -232,9 +231,9 @@ export default function CameraPanel() {
             </div>
           </div>
 
-          {lastRoundNumber && (
+          {lastCapture?.roundNumber && (
             <div className="shrink-0 rounded-lg bg-white px-3 py-2 text-xs font-black text-slate-700 shadow-sm">
-              الجولة {lastRoundNumber}
+              الجولة {lastCapture.roundNumber}
             </div>
           )}
         </div>

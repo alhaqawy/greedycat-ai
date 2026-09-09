@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Camera, CircleStop, Play, RotateCcw, ScanSearch } from "lucide-react";
 import { useCamera } from "./CameraService";
-import { updateTrainingLabel, type TrainingLabel } from "@/lib/storage/TrainingDataset";
 
 export default function CameraPanel() {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -19,52 +18,7 @@ export default function CameraPanel() {
     stopCamera,
     analyzeNow,
     setAutomaticAnalysis,
-    lastCapture,
-    lastRoundNumber,
-    lastDetectedResult,
-    lastResultConfidence,
   } = useCamera();
-
-  const [trainingLabel, setTrainingLabel] = useState<TrainingLabel | null>(null);
-  const [trainingMessage, setTrainingMessage] = useState("");
-
-  const resultOptions: Array<{
-    id: TrainingLabel;
-    name: string;
-    emoji: string;
-  }> = [
-    { id: "corn", name: "ذرة", emoji: "🌽" },
-    { id: "pepper", name: "فلفل", emoji: "🌶️" },
-    { id: "tomato", name: "طماط", emoji: "🍅" },
-    { id: "carrot", name: "جزر", emoji: "🥕" },
-    { id: "shrimp", name: "ربيان", emoji: "🦐" },
-    { id: "fish", name: "سمك", emoji: "🐟" },
-    { id: "cow", name: "بقر", emoji: "🐄" },
-    { id: "chick", name: "كتكوت", emoji: "🐔" },
-  ];
-
-  const handleTrainingLabel = async (label: TrainingLabel) => {
-    const roundNumber = lastRoundNumber ?? lastCapture?.roundNumber ?? null;
-
-    if (!roundNumber) {
-      setTrainingMessage("حلّل الجولة أولاً ثم اختر النتيجة الصحيحة.");
-      return;
-    }
-
-    try {
-      await updateTrainingLabel(roundNumber, label);
-      setTrainingLabel(label);
-
-      const selected = resultOptions.find((item) => item.id === label);
-
-      setTrainingMessage(
-        `تم تدريب الجولة ${roundNumber} على ${selected?.emoji ?? ""} ${selected?.name ?? label}`
-      );
-    } catch (error) {
-      console.error("Training label error:", error);
-      setTrainingMessage("تعذر حفظ التدريب. تأكد من وجود سجل لهذه الجولة.");
-    }
-  };
 
   useEffect(() => {
     const video = videoRef.current;
@@ -91,7 +45,7 @@ export default function CameraPanel() {
   return (
     <div className="space-y-4">
       <div className="relative mx-auto w-full max-w-[420px] overflow-hidden rounded-[24px] border-[6px] border-[#102337] bg-black shadow-2xl">
-        <div className="relative aspect-[4/5] overflow-hidden bg-[#071827] md:aspect-[4/5] 2xl:aspect-[9/16]">
+        <div className="relative aspect-[9/16] overflow-hidden bg-[#071827]">
           {isCameraReady && stream ? (
             <video
               ref={videoRef}
@@ -218,67 +172,6 @@ export default function CameraPanel() {
             }`}
           />
         </button>
-      </div>
-
-      {/* تدريب النتيجة */}
-      <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4">
-        <div className="mb-3 flex items-center justify-between gap-3">
-          <div>
-            <div className="text-sm font-black text-slate-900">
-              تدريب النتيجة
-            </div>
-            <div className="mt-1 text-xs leading-5 text-slate-500">
-              بعد ظهور الجولة، اختر النتيجة الصحيحة حتى يتعلم النظام من الصورة.
-            </div>
-          </div>
-
-          {lastRoundNumber && (
-            <div className="shrink-0 rounded-lg bg-white px-3 py-2 text-xs font-black text-slate-700 shadow-sm">
-              الجولة {lastRoundNumber}
-            </div>
-          )}
-        </div>
-
-        {lastDetectedResult && (
-          <div className="mb-3 rounded-xl bg-white px-3 py-2 text-center text-xs font-bold text-slate-700">
-            نتيجة النظام الحالية:{" "}
-            <span className="font-black">
-              {resultOptions.find((item) => item.id === lastDetectedResult)?.emoji}{" "}
-              {resultOptions.find((item) => item.id === lastDetectedResult)?.name}
-            </span>
-            {lastResultConfidence > 0 && (
-              <span className="mr-2 text-slate-400">
-                ({Math.round(lastResultConfidence)}%)
-              </span>
-            )}
-          </div>
-        )}
-
-        <div className="grid grid-cols-4 gap-2">
-          {resultOptions.map((option) => (
-            <button
-              key={option.id}
-              type="button"
-              onClick={() => void handleTrainingLabel(option.id)}
-              className={`flex min-h-[72px] flex-col items-center justify-center rounded-xl border bg-white px-2 py-2 transition active:scale-95 ${
-                trainingLabel === option.id
-                  ? "border-emerald-500 bg-emerald-50 ring-2 ring-emerald-200"
-                  : "border-slate-200 hover:border-sky-400 hover:bg-sky-50"
-              }`}
-            >
-              <span className="text-2xl">{option.emoji}</span>
-              <span className="mt-1 text-[11px] font-black text-slate-700">
-                {option.name}
-              </span>
-            </button>
-          ))}
-        </div>
-
-        {trainingMessage && (
-          <div className="mt-3 rounded-xl bg-white px-3 py-2 text-center text-xs font-bold text-emerald-700">
-            {trainingMessage}
-          </div>
-        )}
       </div>
 
       <div className="grid grid-cols-2 gap-2">

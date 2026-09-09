@@ -1,0 +1,186 @@
+import { NextResponse } from "next/server";
+import { sql } from "@/lib/db/neon";
+
+const VALID_RESULTS = [
+  "corn",
+  "pepper",
+  "tomato",
+  "carrot",
+  "shrimp",
+  "fish",
+  "cow",
+  "chick",
+] as const;
+
+type ValidResult = (typeof VALID_RESULTS)[number];
+
+function isValidResult(value: unknown): value is ValidResult {
+  return (
+    typeof value === "string" &&
+    VALID_RESULTS.includes(value as ValidResult)
+  );
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+export async function POST(request: Request) {
+  try {
+    const body = await request.json();
+
+    const resultId =
+      typeof body?.resultId === "string" &&
+      body.resultId.trim()
+        ? body.resultId.trim()
+        : crypto.randomUUID();
+
+    const result = body?.result;
+
+    if (!isValidResult(result)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "Invalid result",
+        },
+        { status: 400 },
+      );
+    }
+
+    const prediction = body?.prediction;
+
+    const hasPrediction =
+      prediction &&
+      isValidResult(prediction.predictedResult) &&
+      isFiniteNumber(prediction.confidence) &&
+      isFiniteNumber(prediction.patternLength) &&
+      isFiniteNumber(prediction.matches) &&
+      isFiniteNumber(prediction.samplesUsed);
+
+    const predictionId = `prediction-${resultId}`;
+
+    /*
+     * النتيجة لها ID ثابت.
+     * لذلك إعادة إرسال نفس الطلب لا تنشئ نتيجة مكررة.
+     */
+    await sql`
+      INSERT INTO greedycat_results (
+        id,
+        result
+      )
+      VALUES (
+        ${resultId},
+        ${result}
+      )
+      ON CONFLICT (id) DO NOTHING
+    `;
+
+    let predictionSaved = false;
+    let performanceSaved = false;
+
+    /*
+     * نحفظ التوقع المرتبط بهذه الجولة فقط إذا كان موجودًا.
+     * ID ثابت يمنع تكرار التوقع عند إعادة إرسال الطلب.
+     */
+    if (hasPrediction) {
+      await sql`
+        INSERT INTO greedycat_predictions (
+          id,
+          predicted_result,
+          confidence,
+          pattern_length,
+          matches,
+          samples_used
+        )
+        VALUES (
+          ${predictionId},
+          ${prediction.predictedResult},
+          ${prediction.confidence},
+          ${prediction.patternLength},
+          ${prediction.matches},
+          ${prediction.samplesUsed}
+        )
+        ON CONFLICT (id) DO NOTHING
+      `;
+
+      predictionSaved = true;
+
+      const correct =
+        prediction.predictedResult === result;
+
+      const performanceId =
+        `performance-${resultId}`;
+
+      await sql`
+        INSERT INTO greedycat_prediction_performance (
+          id,
+          prediction_id,
+          actual_result,
+          correct
+        )
+        VALUES (
+          ${performanceId},
+          ${predictionId},
+          ${result},
+          ${correct}
+        )
+        ON CONFLICT (id) DO NOTHING
+      `;
+
+      performanceSaved = true;
+    }
+
+    return NextResponse.json({
+      success: true,
+      resultId,
+      result,
+      predictionSaved,
+      performanceSaved,
+    });
+  } catch (error) {
+    console.error(
+      "GreedyCat result save failed:",
+      error,
+    );
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Failed to save GreedyCat result",
+      },
+      { status: 500 },
+    );
+  }
+}
+
+export async function GET() {
+  try {
+    const rows = await sql`
+      SELECT
+        id,
+        result,
+        created_at
+      FROM greedycat_results
+      ORDER BY created_at DESC
+      LIMIT 100
+    `;
+
+    return NextResponse.json({
+      success: true,
+      results: rows,
+    });
+  } catch (error) {
+    console.error(
+      "GreedyCat results fetch failed:",
+      error,
+    );
+
+    return NextResponse.json(
+      {
+        success: false,
+        error: "Failed to fetch GreedyCat results",
+      },
+      { status: 500 },
+    );
+  }
+}

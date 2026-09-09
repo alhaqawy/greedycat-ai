@@ -1,0 +1,496 @@
+import {
+  getAllTrainingSamples,
+  type TrainingLabel,
+} from "@/lib/storage/TrainingDataset";
+
+export interface VisualTemplate {
+  label: TrainingLabel;
+  samples: number;
+  feature: number[];
+}
+
+export interface TemplatePrediction {
+  result: TrainingLabel | null;
+  confidence: number;
+  samplesUsed: number;
+}
+
+const FEATURE_SIZE = 24;
+
+/*
+ * GreedyCat screen layout:
+ *
+ * The camera stores the complete game frame.
+ * We deliberately do NOT compare the complete screenshot.
+ *
+ * Priority ROI:
+ * 1. Latest-result area in the history strip.
+ * 2. Central wheel area as a fallback.
+ *
+ * Coordinates are normalized to the captured image.
+ */
+
+type ROI = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+};
+
+const LATEST_RESULT_ROI: ROI = {
+  /*
+   * Rightmost/latest result tile in the GreedyCat history strip.
+   */
+  left: 0.84,
+  top: 0.935,
+  width: 0.11,
+  height: 0.055,
+};
+
+const WHEEL_ROI: ROI = {
+  left: 0.08,
+  top: 0.18,
+  width: 0.84,
+  height: 0.43,
+};
+
+function loadImage(dataUrl: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("IMAGE_LOAD_FAILED"));
+    image.src = dataUrl;
+  });
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+/*
+ * Crop a normalized ROI and resize it to a fixed size.
+ */
+async function cropROI(
+  dataUrl: string,
+  roi: ROI,
+): Promise<HTMLCanvasElement> {
+  const image = await loadImage(dataUrl);
+
+  const sourceWidth = image.naturalWidth;
+  const sourceHeight = image.naturalHeight;
+
+  const sx = clamp(
+    Math.floor(sourceWidth * roi.left),
+    0,
+    sourceWidth - 1,
+  );
+
+  const sy = clamp(
+    Math.floor(sourceHeight * roi.top),
+    0,
+    sourceHeight - 1,
+  );
+
+  const sw = clamp(
+    Math.floor(sourceWidth * roi.width),
+    1,
+    sourceWidth - sx,
+  );
+
+  const sh = clamp(
+    Math.floor(sourceHeight * roi.height),
+    1,
+    sourceHeight - sy,
+  );
+
+  const canvas = document.createElement("canvas");
+
+  canvas.width = FEATURE_SIZE;
+  canvas.height = FEATURE_SIZE;
+
+  const ctx = canvas.getContext("2d");
+
+  if (!ctx) {
+    throw new Error("CANVAS_CONTEXT_FAILED");
+  }
+
+  ctx.drawImage(
+    image,
+    sx,
+    sy,
+    sw,
+    sh,
+    0,
+    0,
+    FEATURE_SIZE,
+    FEATURE_SIZE,
+  );
+
+  return canvas;
+}
+
+/*
+ * Extract a compact RGB + luminance feature.
+ *
+ * The image is normalized before comparison so that
+ * small camera exposure changes have less influence.
+ */
+function canvasToFeature(
+  canvas: HTMLCanvasElement,
+): number[] {
+  const ctx = canvas.getContext("2d");
+
+  if (!ctx) {
+    throw new Error("CANVAS_CONTEXT_FAILED");
+  }
+
+  const data = ctx.getImageData(
+    0,
+    0,
+    FEATURE_SIZE,
+    FEATURE_SIZE,
+  ).data;
+
+  const pixels: number[][] = [];
+
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i] / 255;
+    const g = data[i + 1] / 255;
+    const b = data[i + 2] / 255;
+
+    const gray =
+      0.299 * r +
+      0.587 * g +
+      0.114 * b;
+
+    pixels.push([r, g, b, gray]);
+  }
+
+  const feature: number[] = [];
+
+  /*
+   * Spatial pooling: 6 × 6 blocks.
+   * Each block stores average RGB + luminance.
+   */
+  const grid = 6;
+  const block = FEATURE_SIZE / grid;
+
+  for (let gy = 0; gy < grid; gy++) {
+    for (let gx = 0; gx < grid; gx++) {
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let gray = 0;
+      let count = 0;
+
+      for (
+        let y = Math.floor(gy * block);
+        y < Math.floor((gy + 1) * block);
+        y++
+      ) {
+        for (
+          let x = Math.floor(gx * block);
+          x < Math.floor((gx + 1) * block);
+          x++
+        ) {
+          const index =
+            y * FEATURE_SIZE + x;
+
+          const pixel = pixels[index];
+
+          if (!pixel) continue;
+
+          r += pixel[0];
+          g += pixel[1];
+          b += pixel[2];
+          gray += pixel[3];
+          count++;
+        }
+      }
+
+      if (count > 0) {
+        feature.push(
+          r / count,
+          g / count,
+          b / count,
+          gray / count,
+        );
+      }
+    }
+  }
+
+  return feature;
+}
+
+/*
+ * Extract both ROIs.
+ *
+ * The history strip is placed first because the latest result
+ * is usually represented there after the round completes.
+ */
+async function extractFeature(
+  dataUrl: string,
+  roi: ROI,
+): Promise<number[]> {
+  const canvas =
+    await cropROI(dataUrl, roi);
+
+  return canvasToFeature(canvas);
+}
+
+function distance(
+  a: number[],
+  b: number[],
+): number {
+  const length = Math.min(
+    a.length,
+    b.length,
+  );
+
+  if (!length) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  let total = 0;
+
+  for (let i = 0; i < length; i++) {
+    const diff =
+      (a[i] ?? 0) -
+      (b[i] ?? 0);
+
+    total += diff * diff;
+  }
+
+  return Math.sqrt(total / length);
+}
+
+function buildCentroid(
+  features: number[][],
+): number[] {
+  if (!features.length) {
+    return [];
+  }
+
+  const size = features[0].length;
+
+  const centroid =
+    new Array<number>(size).fill(0);
+
+  for (const feature of features) {
+    for (let i = 0; i < size; i++) {
+      centroid[i] += feature[i] ?? 0;
+    }
+  }
+
+  for (let i = 0; i < size; i++) {
+    centroid[i] /= features.length;
+  }
+
+  return centroid;
+}
+
+/**
+ * Build visual templates from manually labelled samples.
+ */
+export async function buildVisualTemplates(): Promise<
+  VisualTemplate[]
+> {
+  const samples =
+    await getAllTrainingSamples();
+
+  const labeled =
+    samples.filter(
+      (sample) =>
+        sample.label !== null &&
+        sample.imageData,
+    );
+
+  const groups =
+    new Map<
+      TrainingLabel,
+      number[][]
+    >();
+
+  for (const sample of labeled) {
+    try {
+      const feature =
+        await extractFeature(
+          sample.imageData,
+          LATEST_RESULT_ROI,
+        );
+
+      const list =
+        groups.get(sample.label!) ?? [];
+
+      list.push(feature);
+      groups.set(sample.label!, list);
+    } catch (error) {
+      console.error(
+        "Template feature error:",
+        error,
+      );
+    }
+  }
+
+  const templates: VisualTemplate[] = [];
+
+  for (const [label, features] of groups) {
+    templates.push({
+      label,
+      samples: features.length,
+      feature: buildCentroid(features),
+    });
+  }
+
+  return templates;
+}
+
+/**
+ * Compare a new image with learned templates.
+ *
+ * A result is returned only when enough labelled data exists
+ * and the visual distance is sufficiently strong.
+ */
+export async function predictFromTemplates(
+  imageData: string,
+): Promise<TemplatePrediction> {
+  if (!imageData) {
+    return {
+      result: null,
+      confidence: 0,
+      samplesUsed: 0,
+    };
+  }
+
+  const templates =
+    await buildVisualTemplates();
+
+  const samplesUsed =
+    templates.reduce(
+      (sum, template) =>
+        sum + template.samples,
+      0,
+    );
+
+  /*
+   * Require at least two labelled samples overall.
+   * This prevents a single accidental image from becoming
+   * an automatic classifier.
+   */
+  if (
+    templates.length === 0 ||
+    samplesUsed < 2
+  ) {
+    return {
+      result: null,
+      confidence: 0,
+      samplesUsed,
+    };
+  }
+
+  const historyFeature =
+    await extractFeature(
+      imageData,
+      LATEST_RESULT_ROI,
+    );
+
+  let bestLabel:
+    | TrainingLabel
+    | null = null;
+
+  let bestDistance =
+    Number.POSITIVE_INFINITY;
+
+  let secondBestDistance =
+    Number.POSITIVE_INFINITY;
+
+  for (const template of templates) {
+    const currentDistance =
+      distance(
+        historyFeature,
+        template.feature,
+      );
+
+    if (
+      currentDistance <
+      bestDistance
+    ) {
+      secondBestDistance =
+        bestDistance;
+
+      bestDistance =
+        currentDistance;
+
+      bestLabel =
+        template.label;
+    } else if (
+      currentDistance <
+      secondBestDistance
+    ) {
+      secondBestDistance =
+        currentDistance;
+    }
+  }
+
+  if (!bestLabel) {
+    return {
+      result: null,
+      confidence: 0,
+      samplesUsed,
+    };
+  }
+
+  /*
+   * Similarity score.
+   *
+   * This is explicitly a visual similarity score,
+   * NOT a probability of the game result.
+   */
+  const baseSimilarity =
+    Math.max(
+      0,
+      Math.min(
+        100,
+        (1 - bestDistance) * 100,
+      ),
+    );
+
+  /*
+   * If the best and second-best classes are almost tied,
+   * reject the classification instead of guessing.
+   */
+  const separation =
+    Number.isFinite(secondBestDistance)
+      ? Math.max(
+          0,
+          Math.min(
+            1,
+            (secondBestDistance -
+              bestDistance) /
+              Math.max(
+                secondBestDistance,
+                0.0001,
+              ),
+          ),
+        )
+      : 1;
+
+  const confidence =
+    baseSimilarity * 0.75 +
+    separation * 100 * 0.25;
+
+  if (confidence < 65) {
+    return {
+      result: null,
+      confidence,
+      samplesUsed,
+    };
+  }
+
+  return {
+    result: bestLabel,
+    confidence,
+    samplesUsed,
+  };
+}

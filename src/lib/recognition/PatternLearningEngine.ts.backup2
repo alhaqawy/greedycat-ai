@@ -1,0 +1,310 @@
+import {
+  getPatternResults,
+} from "@/lib/storage/PatternHistoryStore";
+import type {
+  TrainingLabel,
+} from "@/lib/storage/TrainingDataset";
+
+export type PatternPrediction = {
+  result: TrainingLabel | null;
+  confidence: number;
+  samplesUsed: number;
+  patternLength: number;
+  matches: number;
+  reason: string;
+};
+
+type Score = {
+  result: TrainingLabel;
+  score: number;
+  matches: number;
+};
+
+const PATTERN_LENGTHS = [6, 5, 4, 3, 2];
+
+function findMatches(
+  sequence: TrainingLabel[],
+  currentPattern: TrainingLabel[],
+): Score[] {
+  const scores = new Map<TrainingLabel, Score>();
+
+  for (
+    let i = 0;
+    i + currentPattern.length < sequence.length;
+    i++
+  ) {
+    let matched = true;
+
+    for (
+      let j = 0;
+      j < currentPattern.length;
+      j++
+    ) {
+      if (
+        sequence[i + j] !== currentPattern[j]
+      ) {
+        matched = false;
+        break;
+      }
+    }
+
+    if (!matched) {
+      continue;
+    }
+
+    const next =
+      sequence[i + currentPattern.length];
+
+    if (!next) {
+      continue;
+    }
+
+    const progress =
+      i /
+      Math.max(sequence.length - 1, 1);
+
+    const recencyWeight =
+      1 + progress * 0.75;
+
+    const patternWeight =
+      currentPattern.length *
+      currentPattern.length;
+
+    const weight =
+      patternWeight *
+      recencyWeight;
+
+    const existing = scores.get(next);
+
+    if (existing) {
+      existing.score += weight;
+      existing.matches += 1;
+    } else {
+      scores.set(next, {
+        result: next,
+        score: weight,
+        matches: 1,
+      });
+    }
+  }
+
+  return Array.from(scores.values()).sort(
+    (a, b) => b.score - a.score,
+  );
+}
+
+function calculateTransitionScores(
+  sequence: TrainingLabel[],
+): Score[] {
+  const last =
+    sequence[sequence.length - 1];
+
+  if (!last) {
+    return [];
+  }
+
+  const scores = new Map<TrainingLabel, Score>();
+
+  for (
+    let i = 0;
+    i + 1 < sequence.length;
+    i++
+  ) {
+    if (sequence[i] !== last) {
+      continue;
+    }
+
+    const next = sequence[i + 1];
+
+    if (!next) {
+      continue;
+    }
+
+    const existing = scores.get(next);
+
+    if (existing) {
+      existing.score += 1;
+      existing.matches += 1;
+    } else {
+      scores.set(next, {
+        result: next,
+        score: 1,
+        matches: 1,
+      });
+    }
+  }
+
+  return Array.from(scores.values()).sort(
+    (a, b) => b.score - a.score,
+  );
+}
+
+function confidenceFromScores(
+  scores: Score[],
+): number {
+  if (!scores.length) {
+    return 0;
+  }
+
+  const best = scores[0];
+
+  if (!best) {
+    return 0;
+  }
+
+  const second =
+    scores[1]?.score ?? 0;
+
+  const total = scores.reduce(
+    (sum, item) => sum + item.score,
+    0,
+  );
+
+  if (total <= 0) {
+    return 0;
+  }
+
+  const dominance =
+    best.score /
+    Math.max(
+      best.score + second,
+      0.0001,
+    );
+
+  const support =
+    Math.min(best.matches / 5, 1);
+
+  const distribution =
+    best.score / total;
+
+  return Math.round(
+    Math.min(
+      95,
+      dominance * 55 +
+        support * 25 +
+        distribution * 20,
+    ),
+  );
+}
+
+export async function predictFromPatterns(): Promise<PatternPrediction> {
+  const history = await getPatternResults();
+
+  const sequence = history.map(
+    (item) => item.result,
+  );
+
+  if (sequence.length < 4) {
+    return {
+      result: null,
+      confidence: 0,
+      samplesUsed: sequence.length,
+      patternLength: 0,
+      matches: 0,
+      reason:
+        "نحتاج إلى 4 نتائج مؤكدة على الأقل لبداية تحليل الأنماط.",
+    };
+  }
+
+  let best: Score | null = null;
+  let bestConfidence = 0;
+  let bestPatternLength = 0;
+
+  for (
+    const patternLength of PATTERN_LENGTHS
+  ) {
+    if (sequence.length <= patternLength) {
+      continue;
+    }
+
+    const currentPattern =
+      sequence.slice(-patternLength);
+
+    const scores = findMatches(
+      sequence,
+      currentPattern,
+    );
+
+    if (!scores.length) {
+      continue;
+    }
+
+    const candidate = scores[0];
+
+    if (!candidate) {
+      continue;
+    }
+
+    const confidence =
+      confidenceFromScores(scores);
+
+    const supported =
+      candidate.matches >= 2;
+
+    const effective =
+      supported
+        ? confidence + patternLength * 2
+        : confidence;
+
+    if (
+      !best ||
+      effective > bestConfidence
+    ) {
+      best = candidate;
+      bestConfidence = effective;
+      bestPatternLength =
+        patternLength;
+    }
+  }
+
+  if (!best) {
+    const transitionScores =
+      calculateTransitionScores(sequence);
+
+    const transition =
+      transitionScores[0];
+
+    if (transition) {
+      const confidence =
+        confidenceFromScores(
+          transitionScores,
+        );
+
+      return {
+        result: transition.result,
+        confidence: Math.min(
+          75,
+          confidence,
+        ),
+        samplesUsed: sequence.length,
+        patternLength: 1,
+        matches: transition.matches,
+        reason:
+          `لا يوجد تطابق نمطي طويل كافٍ؛ الانتقال الأخير ظهر معه هذا الاختيار ${transition.matches} مرة.`,
+      };
+    }
+
+    return {
+      result: null,
+      confidence: 0,
+      samplesUsed: sequence.length,
+      patternLength: 0,
+      matches: 0,
+      reason:
+        "لا يوجد نمط تاريخي مشابه كافٍ حتى الآن.",
+    };
+  }
+
+  return {
+    result: best.result,
+    confidence: Math.min(
+      95,
+      Math.round(bestConfidence),
+    ),
+    samplesUsed: sequence.length,
+    patternLength: bestPatternLength,
+    matches: best.matches,
+    reason:
+      `تطابق نمطي بطول ${bestPatternLength} مع ${best.matches} حالة تاريخية مشابهة.`,
+  };
+}

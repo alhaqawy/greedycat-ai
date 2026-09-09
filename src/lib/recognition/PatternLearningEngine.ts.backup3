@@ -1,0 +1,589 @@
+import {
+  getPatternResults,
+} from "@/lib/storage/PatternHistoryStore";
+
+import type {
+  TrainingLabel,
+} from "@/lib/storage/TrainingDataset";
+
+export type PatternPrediction = {
+  result: TrainingLabel | null;
+  confidence: number;
+  samplesUsed: number;
+  patternLength: number;
+  matches: number;
+  reason: string;
+};
+
+type Score = {
+  result: TrainingLabel;
+  score: number;
+  matches: number;
+  patternLengths: number[];
+};
+
+const PATTERN_LENGTHS = [6, 5, 4, 3, 2];
+
+const MIN_PATTERN_MATCHES = 2;
+const MIN_TRANSITION_MATCHES = 3;
+
+function isSamePattern(
+  sequence: TrainingLabel[],
+  start: number,
+  pattern: TrainingLabel[],
+): boolean {
+  if (
+    start < 0 ||
+    start + pattern.length >= sequence.length
+  ) {
+    return false;
+  }
+
+  for (let i = 0; i < pattern.length; i++) {
+    if (
+      sequence[start + i] !== pattern[i]
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+/*
+ * البحث عن كل ظهور تاريخي لنفس النمط.
+ *
+ * لا نستخدم رقم الجولة.
+ * لا نستخدم Hot.
+ * لا نستخدم مبالغ.
+ * لا نستخدم الصور.
+ *
+ * المصدر الوحيد هو تسلسل النتائج المؤكدة.
+ */
+function findPatternScores(
+  sequence: TrainingLabel[],
+  currentPattern: TrainingLabel[],
+): Score[] {
+  const scores = new Map<
+    TrainingLabel,
+    Score
+  >();
+
+  const patternLength =
+    currentPattern.length;
+
+  for (
+    let start = 0;
+    start + patternLength <
+    sequence.length;
+    start++
+  ) {
+    /*
+     * لا نريد اعتبار آخر ظهور حالي
+     * تطابقًا تاريخيًا لنفسه.
+     */
+    if (
+      start + patternLength ===
+      sequence.length
+    ) {
+      continue;
+    }
+
+    if (
+      !isSamePattern(
+        sequence,
+        start,
+        currentPattern,
+      )
+    ) {
+      continue;
+    }
+
+    const next =
+      sequence[start + patternLength];
+
+    if (!next) {
+      continue;
+    }
+
+    /*
+     * كلما كان التطابق أحدث،
+     * تزيد أهميته قليلًا.
+     */
+    const recency =
+      0.75 +
+      0.75 *
+        (
+          start /
+          Math.max(
+            sequence.length - 1,
+            1,
+          )
+        );
+
+    /*
+     * النمط الأطول أقوى.
+     *
+     * 6 = 36
+     * 5 = 25
+     * 4 = 16
+     * 3 = 9
+     * 2 = 4
+     */
+    const lengthWeight =
+      patternLength *
+      patternLength;
+
+    /*
+     * لا نعطي تطابقًا واحدًا
+     * وزنًا ضخمًا لمجرد أنه حديث.
+     */
+    const weight =
+      lengthWeight *
+      recency;
+
+    const existing =
+      scores.get(next);
+
+    if (existing) {
+      existing.score += weight;
+      existing.matches += 1;
+
+      if (
+        !existing.patternLengths.includes(
+          patternLength,
+        )
+      ) {
+        existing.patternLengths.push(
+          patternLength,
+        );
+      }
+    } else {
+      scores.set(next, {
+        result: next,
+        score: weight,
+        matches: 1,
+        patternLengths: [
+          patternLength,
+        ],
+      });
+    }
+  }
+
+  return Array.from(
+    scores.values(),
+  ).sort(
+    (a, b) =>
+      b.score - a.score,
+  );
+}
+
+/*
+ * تجميع الأدلة من جميع أطوال الأنماط.
+ *
+ * مثال:
+ *
+ * آخر 6 نتائج لها تطابق تاريخي
+ * وآخر 4 نتائج أيضًا لها تطابقات
+ *
+ * يتم جمع الأدلة بدل الاعتماد على
+ * نمط واحد فقط.
+ */
+function collectPatternEvidence(
+  sequence: TrainingLabel[],
+): {
+  scores: Score[];
+  bestPatternLength: number;
+} {
+  const combined =
+    new Map<TrainingLabel, Score>();
+
+  let bestPatternLength = 0;
+
+  for (
+    const patternLength of PATTERN_LENGTHS
+  ) {
+    if (
+      sequence.length <=
+      patternLength
+    ) {
+      continue;
+    }
+
+    const currentPattern =
+      sequence.slice(
+        -patternLength,
+      );
+
+    const scores =
+      findPatternScores(
+        sequence,
+        currentPattern,
+      );
+
+    for (const item of scores) {
+      const existing =
+        combined.get(item.result);
+
+      if (existing) {
+        existing.score += item.score;
+        existing.matches += item.matches;
+
+        for (
+          const length of item.patternLengths
+        ) {
+          if (
+            !existing.patternLengths.includes(
+              length,
+            )
+          ) {
+            existing.patternLengths.push(
+              length,
+            );
+          }
+        }
+      } else {
+        combined.set(item.result, {
+          result: item.result,
+          score: item.score,
+          matches: item.matches,
+          patternLengths: [
+            ...item.patternLengths,
+          ],
+        });
+      }
+
+      if (
+        item.matches >= MIN_PATTERN_MATCHES &&
+        patternLength >
+          bestPatternLength
+      ) {
+        bestPatternLength =
+          patternLength;
+      }
+    }
+  }
+
+  return {
+    scores: Array.from(
+      combined.values(),
+    ).sort(
+      (a, b) =>
+        b.score - a.score,
+    ),
+    bestPatternLength,
+  };
+}
+
+/*
+ * الانتقال المباشر يبقى موجودًا،
+ * لكنه لا يصبح توقعًا قويًا إلا إذا
+ * تكرر تاريخيًا عدة مرات.
+ */
+function calculateTransitionScores(
+  sequence: TrainingLabel[],
+): Score[] {
+  const last =
+    sequence[sequence.length - 1];
+
+  if (!last) {
+    return [];
+  }
+
+  const scores = new Map<
+    TrainingLabel,
+    Score
+  >();
+
+  for (
+    let i = 0;
+    i + 1 < sequence.length;
+    i++
+  ) {
+    if (sequence[i] !== last) {
+      continue;
+    }
+
+    const next =
+      sequence[i + 1];
+
+    if (!next) {
+      continue;
+    }
+
+    /*
+     * الانتقالات الأحدث أهم قليلًا.
+     */
+    const recency =
+      0.75 +
+      0.75 *
+        (
+          i /
+          Math.max(
+            sequence.length - 1,
+            1,
+          )
+        );
+
+    const existing =
+      scores.get(next);
+
+    if (existing) {
+      existing.score += recency;
+      existing.matches += 1;
+    } else {
+      scores.set(next, {
+        result: next,
+        score: recency,
+        matches: 1,
+        patternLengths: [1],
+      });
+    }
+  }
+
+  return Array.from(
+    scores.values(),
+  ).sort(
+    (a, b) =>
+      b.score - a.score,
+  );
+}
+
+/*
+ * حساب الثقة من:
+ *
+ * 1. قوة أفضل نتيجة مقابل الثانية.
+ * 2. عدد مرات تكرار النمط.
+ * 3. نسبة الأدلة الإجمالية.
+ *
+ * الحد الأعلى 95%.
+ */
+function confidenceFromScores(
+  scores: Score[],
+): number {
+  if (!scores.length) {
+    return 0;
+  }
+
+  const best = scores[0];
+
+  if (!best) {
+    return 0;
+  }
+
+  const second =
+    scores[1]?.score ?? 0;
+
+  const total =
+    scores.reduce(
+      (sum, item) =>
+        sum + item.score,
+      0,
+    );
+
+  if (total <= 0) {
+    return 0;
+  }
+
+  const dominance =
+    best.score /
+    Math.max(
+      best.score + second,
+      0.0001,
+    );
+
+  const support =
+    Math.min(
+      best.matches / 6,
+      1,
+    );
+
+  const distribution =
+    best.score / total;
+
+  const confidence =
+    dominance * 45 +
+    support * 30 +
+    distribution * 25;
+
+  return Math.round(
+    Math.min(
+      95,
+      Math.max(
+        0,
+        confidence,
+      ),
+    ),
+  );
+}
+
+export async function predictFromPatterns(): Promise<PatternPrediction> {
+  const history =
+    await getPatternResults();
+
+  const sequence =
+    history.map(
+      (item) =>
+        item.result,
+    );
+
+  /*
+   * أقل من 4 نتائج:
+   * لا توجد بيانات كافية.
+   */
+  if (sequence.length < 4) {
+    return {
+      result: null,
+      confidence: 0,
+      samplesUsed: sequence.length,
+      patternLength: 0,
+      matches: 0,
+      reason:
+        "نحتاج إلى 4 نتائج مؤكدة على الأقل لبداية تحليل الأنماط.",
+    };
+  }
+
+  /*
+   * المرحلة الأولى:
+   * تحليل الأنماط المتكررة.
+   */
+  const {
+    scores,
+    bestPatternLength,
+  } =
+    collectPatternEvidence(
+      sequence,
+    );
+
+  const patternCandidates =
+    scores.filter(
+      (item) =>
+        item.matches >=
+        MIN_PATTERN_MATCHES,
+    );
+
+  const bestPattern =
+    patternCandidates[0];
+
+  /*
+   * لا نعتمد على تطابق واحد.
+   *
+   * يجب أن يكون للنمط دعم تاريخي
+   * لا يقل عن مرتين.
+   */
+  if (bestPattern) {
+    const confidence =
+      confidenceFromScores(
+        patternCandidates,
+      );
+
+    /*
+     * إذا كان أفضل دليل طويلًا،
+     * نضيف دفعة بسيطة للثقة.
+     *
+     * لا تتجاوز 95%.
+     */
+    const lengthBonus =
+      bestPatternLength >= 6
+        ? 5
+        : bestPatternLength >= 5
+          ? 4
+          : bestPatternLength >= 4
+            ? 3
+            : bestPatternLength >= 3
+              ? 2
+              : 0;
+
+    const finalConfidence =
+      Math.min(
+        95,
+        confidence +
+          lengthBonus,
+      );
+
+    const lengths =
+      bestPattern.patternLengths
+        .sort(
+          (a, b) => b - a,
+        )
+        .join("، ");
+
+    return {
+      result:
+        bestPattern.result,
+      confidence:
+        finalConfidence,
+      samplesUsed:
+        sequence.length,
+      patternLength:
+        bestPatternLength,
+      matches:
+        bestPattern.matches,
+      reason:
+        `تطابق تاريخي للنمط بطول ${bestPatternLength}، والنتيجة ${bestPattern.matches} مرات بعد أنماط مشابهة (أطوال مدعومة: ${lengths}).`,
+    };
+  }
+
+  /*
+   * المرحلة الثانية:
+   *
+   * إذا لم توجد أنماط متكررة كافية،
+   * نبحث عن انتقال مباشر متكرر.
+   *
+   * الانتقال يحتاج 3 مرات على الأقل.
+   */
+  const transitionScores =
+    calculateTransitionScores(
+      sequence,
+    );
+
+  const supportedTransitions =
+    transitionScores.filter(
+      (item) =>
+        item.matches >=
+        MIN_TRANSITION_MATCHES,
+    );
+
+  const transition =
+    supportedTransitions[0];
+
+  if (transition) {
+    const confidence =
+      confidenceFromScores(
+        supportedTransitions,
+      );
+
+    return {
+      result:
+        transition.result,
+      confidence:
+        Math.min(
+          70,
+          confidence,
+        ),
+      samplesUsed:
+        sequence.length,
+      patternLength: 1,
+      matches:
+        transition.matches,
+      reason:
+        `لا يوجد نمط طويل متكرر كافٍ؛ الانتقال من آخر نتيجة تكرر ${transition.matches} مرات تاريخيًا.`,
+    };
+  }
+
+  /*
+   * لا يوجد دليل كافٍ.
+   *
+   * لا نخترع توقعًا من توزيع النتائج.
+   */
+  return {
+    result: null,
+    confidence: 0,
+    samplesUsed:
+      sequence.length,
+    patternLength: 0,
+    matches: 0,
+    reason:
+      "لا يوجد نمط تاريخي متكرر أو انتقال مدعوم بما يكفي لإعطاء توقع موثوق.",
+  };
+}

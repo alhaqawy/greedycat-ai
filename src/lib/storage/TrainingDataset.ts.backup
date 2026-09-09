@@ -63,89 +63,18 @@ export async function saveTrainingSample(
     const transaction = db.transaction(STORE_NAME, "readwrite");
     const store = transaction.objectStore(STORE_NAME);
 
-    /*
-     * roundNumber is the primary key, therefore every round can
-     * exist only once in IndexedDB.
-     *
-     * If the round already exists, update the existing record
-     * instead of creating a duplicate. This is important when
-     * OCR detects the same round more than once or when a later
-     * capture contains better/corrected data.
-     */
-    const existingRequest = store.get(
-      sample.roundNumber,
-    );
+    const request = store.add(record);
 
-    existingRequest.onsuccess = () => {
-      const existing =
-        existingRequest.result as TrainingSample | undefined;
-
-      if (existing) {
-        const updated: TrainingSample = {
-          ...existing,
-          imageData:
-            sample.imageData || existing.imageData,
-          rawOCR:
-            sample.rawOCR || existing.rawOCR,
-          ocrConfidence:
-            Math.max(
-              existing.ocrConfidence ?? 0,
-              sample.ocrConfidence ?? 0,
-            ),
-          detectedResult:
-            sample.detectedResult ??
-            existing.detectedResult ??
-            null,
-          label:
-            existing.label ??
-            sample.label ??
-            null,
-          labeledAt:
-            existing.labeledAt ??
-            (sample.label
-              ? new Date().toISOString()
-              : null),
-        };
-
-        const putRequest =
-          store.put(updated);
-
-        putRequest.onsuccess = () => {
-          resolve(updated);
-        };
-
-        putRequest.onerror = () => {
-          reject(putRequest.error);
-        };
-
-        return;
-      }
-
-      const addRequest =
-        store.add(record);
-
-      addRequest.onsuccess = () => {
-        resolve(record);
-      };
-
-      addRequest.onerror = () => {
-        if (
-          addRequest.error?.name ===
-          "ConstraintError"
-        ) {
-          reject(
-            new Error(
-              "ROUND_ALREADY_EXISTS",
-            ),
-          );
-        } else {
-          reject(addRequest.error);
-        }
-      };
+    request.onsuccess = () => {
+      resolve(record);
     };
 
-    existingRequest.onerror = () => {
-      reject(existingRequest.error);
+    request.onerror = () => {
+      if (request.error?.name === "ConstraintError") {
+        reject(new Error("ROUND_ALREADY_EXISTS"));
+      } else {
+        reject(request.error);
+      }
     };
 
     transaction.oncomplete = () => db.close();

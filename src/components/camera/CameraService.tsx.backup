@@ -1,10 +1,7 @@
 "use client";
 
 import { predictFromTemplates } from "@/lib/recognition/TemplateLearningEngine";
-import {
-  getTrainingSample,
-  saveTrainingSample,
-} from "@/lib/storage/TrainingDataset";
+import { saveTrainingSample } from "@/lib/storage/TrainingDataset";
 
 import {
   createContext,
@@ -307,19 +304,70 @@ export function CameraProvider({
 
       /*
        * منع تكرار الجولة.
-       *
-       * lastRoundRef هو فحص سريع داخل الذاكرة فقط.
-       * IndexedDB هو المرجع النهائي للتأكد من وجود الجولة.
        */
-      const isDuplicateInMemory =
+      const isDuplicate =
         ocr.roundNumber !== null &&
-        lastRoundRef.current ===
+        lastRoundRef.current === ocr.roundNumber;
+
+      if (ocr.success && !isDuplicate) {
+        lastRoundRef.current =
           ocr.roundNumber;
 
-      if (
-        !ocr.success ||
-        ocr.roundNumber === null
-      ) {
+        if (mountedRef.current) {
+          setLastRoundNumber(
+            ocr.roundNumber
+          );
+
+          setLastCapture(
+            captureRecord
+          );
+        }
+
+        const newRoundNumber = ocr.roundNumber;
+
+        if (newRoundNumber === null) {
+          console.error(
+            "[GreedyCat AI] Cannot save round without a round number."
+          );
+        } else {
+          try {
+            await saveTrainingSample({
+              roundNumber: newRoundNumber,
+              label: null,
+              detectedResult: detectedResult as import("@/lib/storage/TrainingDataset").TrainingLabel | null,
+              imageData: capture.imageData,
+              ocrConfidence: ocr.confidence,
+              rawOCR: ocr.rawText,
+            });
+
+            console.log(
+              "[GreedyCat AI] New round saved to training_samples:",
+              newRoundNumber
+            );
+          } catch (saveError) {
+            console.error(
+              "[GreedyCat AI] Failed to save new round:",
+              saveError
+            );
+          }
+        }
+
+        console.log(
+          "[GreedyCat AI] New round detected:",
+          newRoundNumber
+        );
+      } else if (isDuplicate) {
+        console.log(
+          "[GreedyCat AI] Duplicate round ignored:",
+          ocr.roundNumber
+        );
+
+        if (mountedRef.current) {
+          setLastCapture(
+            captureRecord
+          );
+        }
+      } else {
         console.log(
           "[GreedyCat AI] OCR did not produce a valid new round:",
           ocr.rawText
@@ -329,122 +377,6 @@ export function CameraProvider({
           setLastCapture(
             captureRecord
           );
-        }
-      } else {
-        const newRoundNumber =
-          ocr.roundNumber;
-
-        let existingRound = null;
-
-        try {
-          existingRound =
-            await getTrainingSample(
-              newRoundNumber
-            );
-        } catch (storageError) {
-          console.error(
-            "[GreedyCat AI] Failed to check existing round:",
-            storageError
-          );
-        }
-
-        /*
-         * إذا كانت الجولة موجودة، لا ننشئ سجلًا ثانيًا.
-         *
-         * يمكن تحديث السجل نفسه فقط عندما:
-         * 1. لا توجد نتيجة مكتشفة سابقًا ولدينا نتيجة الآن.
-         * 2. قراءة OCR الجديدة أكثر ثقة من القراءة السابقة.
-         */
-        const shouldUpdateExisting =
-          existingRound !== null &&
-          (
-            (
-              !existingRound.detectedResult &&
-              Boolean(detectedResult)
-            ) ||
-            ocr.confidence >
-              existingRound.ocrConfidence
-          );
-
-        const shouldCreateNew =
-          existingRound === null;
-
-        if (
-          shouldCreateNew ||
-          shouldUpdateExisting
-        ) {
-          try {
-            const saved =
-              await saveTrainingSample({
-                roundNumber:
-                  newRoundNumber,
-                label:
-                  existingRound?.label ??
-                  null,
-                detectedResult:
-                  detectedResult as import(
-                    "@/lib/storage/TrainingDataset"
-                  ).TrainingLabel | null,
-                imageData:
-                  capture.imageData,
-                ocrConfidence:
-                  ocr.confidence,
-                rawOCR:
-                  ocr.rawText,
-              });
-
-            lastRoundRef.current =
-              newRoundNumber;
-
-            if (mountedRef.current) {
-              setLastRoundNumber(
-                newRoundNumber
-              );
-
-              setLastCapture({
-                ...captureRecord,
-                detectedResult:
-                  saved.detectedResult ??
-                  null,
-              });
-            }
-
-            if (shouldCreateNew) {
-              console.log(
-                "[GreedyCat AI] New round saved:",
-                newRoundNumber
-              );
-            } else {
-              console.log(
-                "[GreedyCat AI] Existing round updated:",
-                newRoundNumber
-              );
-            }
-          } catch (saveError) {
-            console.error(
-              "[GreedyCat AI] Failed to save round:",
-              saveError
-            );
-          }
-        } else {
-          lastRoundRef.current =
-            newRoundNumber;
-
-          if (mountedRef.current) {
-            setLastRoundNumber(
-              newRoundNumber
-            );
-          }
-
-          if (
-            isDuplicateInMemory ||
-            existingRound !== null
-          ) {
-            console.log(
-              "[GreedyCat AI] Duplicate round verified and ignored:",
-              newRoundNumber
-            );
-          }
         }
       }
     } catch (error) {

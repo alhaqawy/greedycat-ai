@@ -67,7 +67,7 @@ export default function DataCapturePanel() {
   };
 
   return (
-    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3 md:p-3 2xl:p-4">
       <div className="mb-4 flex items-center justify-between">
         <div>
           <h3 className="text-lg font-bold text-white">تصنيف الجولة</h3>
@@ -85,11 +85,11 @@ export default function DataCapturePanel() {
       </div>
 
       {lastCapture?.imageData ? (
-        <div className="mb-4 overflow-hidden rounded-xl border border-white/10 bg-black">
+        <div className="mb-3 overflow-hidden rounded-xl border border-white/10 bg-black">
           <img
             src={lastCapture.imageData}
             alt="آخر لقطة"
-            className="max-h-64 w-full object-contain"
+            className="max-h-40 w-full object-contain md:max-h-40 2xl:max-h-64"
           />
         </div>
       ) : (
@@ -98,18 +98,18 @@ export default function DataCapturePanel() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="grid grid-cols-4 gap-1.5 md:gap-2">
         {LABELS.map((item) => (
           <button
             key={item.id}
             type="button"
             disabled={saving || !lastCapture?.imageData}
             onClick={() => saveLabel(item.id)}
-            className="rounded-xl border border-white/10 bg-white/[0.04] p-3 transition hover:bg-white/[0.09] disabled:cursor-not-allowed disabled:opacity-40"
+            className="rounded-lg border border-white/10 bg-white/[0.04] p-2 transition hover:bg-white/[0.09] disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <div className="text-2xl">{item.emoji}</div>
+            <div className="text-xl md:text-2xl">{item.emoji}</div>
 
-            <div className="mt-1 text-sm font-semibold text-white">
+            <div className="mt-0.5 text-xs font-semibold text-white md:text-sm">
               {item.name}
             </div>
 
